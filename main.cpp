@@ -2,18 +2,20 @@
 #include <filesystem>
 #include <map>
 #include <list>
-#include "lib/convert.hpp"
+#include "marktool/convert.h"
 #include "html.h"
 
 namespace fs = std::filesystem;
 
-std::string output_root = "./output";
+fs::path output_root;
 
-void save(const std::string &content, const std::string &path) {
-    std::ofstream out;
-    out.open(path);
-    out << content;
-    out.close();
+void save(const std::string &content, const fs::path &path) {
+    if (fs::exists(path.parent_path()) or fs::create_directories(path.parent_path())) {
+        std::ofstream out;
+        out.open(path);
+        out << content;
+        out.close();
+    }
 }
 
 std::string trim(const std::string &s) {
@@ -41,109 +43,85 @@ void process_article_info(std::map<std::string, std::string> &info, std::ifstrea
     }
 }
 
-std::string generate_article(std::ifstream &fin, const std::map<std::string, std::string> &info, const std::string &output_path) {
-    auto content = to_html(fin);
-    auto cached_homepage_item = cat_homepage_item_html(info.at("title"), content, info.at("url"));
-    save(cat_markdown_page_html(info.at("title"), content), output_path);
-    return cached_homepage_item;
+void generate_article(const Article *article, const fs::path &output_path) {
+    save(cat_article_html(article), output_path);
 }
 
-void generate_list(const std::string &title, const std::string &url, const std::list<std::pair<std::string, std::string>> &list) {
-    // url = /archives
-    std::string s;
-    for (auto [text, href] : list) {
-        s.append(page_link(text, href));
-    }
-    auto p = output_root + url;
-    if (fs::exists(p) or fs::create_directories(p)) {
-        save(cat_page_html(title, s), p + "/index.html");
-    }
+void generate_archives(const std::list<const Article*> &article_list) {
+    save(cat_archives_html(article_list), output_root / "archives" / "index.html");
 }
 
-void generate_archives(const std::list<std::pair<std::string, std::string>> &list) {
-    generate_list("归档", "/archives", list);
-}
-
-void generate_categories(const std::map<std::string, std::list<std::pair<std::string, std::string>>> &category_map) {
-    std::string s;
+void generate_categories(const std::map<std::string, std::list<const Article*>> &category_map) {
+    std::list<std::string> category_list;
     for (auto [text, list] : category_map) {
-        s.append(page_link(text, "/categories/" + text));
-        generate_list(text, "/categories/" + text, list);
+        category_list.emplace_back(text);
+        save(cat_category_articles_html(text, list), output_root / "categories" / text / "index.html");
     }
-    if (fs::exists(output_root + "/categories") or fs::create_directories(output_root + "/categories")) {
-        save(cat_page_html("类别", s), output_root + "/categories/index.html");
-    }
+    save(cat_categories_html(category_list), output_root / "categories" / "index.html");
 }
 
-void generate_homepage(const std::list<std::pair<std::string, std::string>> &list) {
-    std::string s;
-    int i = 0;
-    for (auto [url, article_content] : list) {
-        s.append(article_content);
-        i ++;
-        if (i % 3 == 0) break;
-    }
-    save(cat_homepage_html(s), output_root + "/index.html");
+void generate_homepage(const std::list<const Article*> &article_list) {
+    save(cat_homepage_html(article_list), output_root / "index.html");
 }
 
-void generate(const std::string &path) {
-    std::list<std::pair<std::string, std::string>> post_list;
-    std::map<std::string, std::list<std::pair<std::string, std::string>>> category_map;
-    std::list<std::pair<std::string, std::string>> homepage_list;
-    if (not fs::exists(path)) {
-        std::cout << "wrong path" << std::endl;
-        exit(1);
-    }
+bool compare_article_desc_by_date (const Article *first, const Article *second) {
+    return first->date > second->date;
+}
+
+Article* process_markdown(const fs::path &entry_path, const fs::path &relative_path) {
+    auto url = "/" / relative_path;
+    std::ifstream fin(entry_path);
+    std::map<std::string, std::string> info;
+    // 处理分类、标题、日期等信息
+    process_article_info(info, fin);
+    auto article_pointer = new Article(info.at("title"), url, to_html(fin), info.at("categories"), info.at("date"));
+    fin.close();
+    return article_pointer;
+}
+
+void generate(const fs::path &path) {
+    std::list<const Article*> article_list;
+    std::map<std::string, std::list<const Article*>> category_map;
 
     for (const auto & entry : fs::recursive_directory_iterator(path)) {
-        if (not entry.is_directory()) {
-            const auto& file = entry.path();
-            if (file.extension() == ".md") {
-                // 获取路径信息
-                auto s1 = file.parent_path().string();
-                auto url = file.parent_path().string().substr(path.length() - 1) + "/" + file.stem().string();
-                auto output_directory = output_root + file.parent_path().string().substr(path.length() - 1) + "/" + file.stem().string();
-                if (fs::exists(output_directory) or fs::create_directories(output_directory)) {
-                    std::map<std::string, std::string> info;
-                    std::ifstream fin(file.string());
-                    // 处理分类、标题、日期等信息
-                    process_article_info(info, fin);
-                    category_map[info.at("categories")].emplace_back(info.at("title"), url);
-                    post_list.emplace_back(info.at("title"), url);
-                    info["url"] = url;
-                    // 生成文章详情页
-                    auto article_content = generate_article(fin, info, output_directory + "/" + "index.html");
-                    homepage_list.emplace_back(url, article_content);
-                    fin.close();
-                } else {
-                    std::cout << file.parent_path() << std::endl;
-                    std::cout << "ERROR!!" << std::endl;
-                }
-            }
+        if (not entry.is_directory() and entry.path().extension() == ".md") {
+            // 获取路径信息
+            auto relative_path = entry.path().lexically_relative(path).replace_extension("");
+            auto article_pointer = process_markdown(entry.path(), relative_path);
+            article_list.push_back(article_pointer);
+            category_map[article_pointer->category].push_back(article_pointer);
+
+            // 生成文章详情页
+            generate_article(article_pointer, output_root / relative_path / "index.html");
         }
     }
-    generate_homepage(homepage_list);
-    generate_archives(post_list);
+
+    article_list.sort(compare_article_desc_by_date);
+    generate_homepage(article_list);
+    generate_archives(article_list);
     generate_categories(category_map);
 }
 
 // tiny_press -i ./post/ -o /usr/local/var/www
 int main (int argc, char const *argv[]) {
-    std::string path = "./post";
+    fs::path path = "./post";
+    output_root = "./output";
 
     if (argc == 2) {
         path = argv[1];
     } else {
         for (unsigned i = 1; i < argc; i++) {
             if (std::string(argv[i]) == "-o") {
-                output_root = argv[i + 1];
+                output_root = fs::path(argv[i + 1]);
             } else if (std::string(argv[i]) == "-i") {
                 path = argv[i + 1];
             }
         }
     }
-
-    if (path.back() != '/') path.push_back('/');
+    if (not fs::exists(path)) {
+        std::cout << "wrong path" << std::endl;
+        exit(1);
+    }
     generate(path);
 
     std::cout << "Current path is " << fs::current_path() << '\n';

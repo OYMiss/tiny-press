@@ -1,3 +1,12 @@
 #!/bin/sh
 git clone git@github.com:OYMiss/marktool.git
-cmake . 
+case $1 in
+        --prefix*)
+        echo install to ${1:9}
+        cmake -DCMAKE_INSTALL_PREFIX=${1:9} .
+        ;;
+        *)
+        echo install to default location\(maybe /usr/local/bin\)
+        cmake .
+        ;;
+esac
